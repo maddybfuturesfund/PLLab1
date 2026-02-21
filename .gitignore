@@ -1,0 +1,7 @@
+/target
+/test/*.run
+/test/*.s
+/runtime/*.o
+/runtime/*.a
+.DS_Store
+EOF
