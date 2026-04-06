@@ -5,19 +5,33 @@ use std::env;
 use std::fs::File;
 use std::io::prelude::*;
 
+const NUM_TAG: i64 = 0;
+const NUM_TAG_MASK: i64 = 1;
+const BOOL_TAG: i64 = 1;
+const BOOL_TAG_MASK: i64 = 1;
+const TRUE_VAL: i64 = 3;
+const FALSE_VAL: i64 = 1;
+
+fn encode_num(n: i32) -> i64 {
+    (n as i64) << 1
+}
+
+fn decode_num(tagged: i64) -> i32 {
+    (tagged >> 1) as i32
+}
+
 /// Unary operators
 #[derive(Debug)]
-enum Op1 {
-    Add1,
-    Sub1,
+enum UnOp {
+    Add1, Sub1, Negate,
+    IsNum, IsBool,
 }
 
 /// Binary operators
 #[derive(Debug)]
-enum Op2 {
-    Plus,
-    Minus,
-    Times,
+enum BinOp {
+    Plus, Minus, Times,
+    Less, Greater, LessEq, GreaterEq, Equal,
 }
 
 /// The Boa expression AST
@@ -32,27 +46,37 @@ enum Op2 {
 #[derive(Debug)]
 enum Expr {
     Number(i32),
+    Bool(bool),
     Id(String),
+    Input,
+    Var(String),
     Let(Vec<(String, Expr)>, Box<Expr>),
-    UnOp(Op1, Box<Expr>),
-    BinOp(Op2, Box<Expr>, Box<Expr>),
+    UnOp(UnOp, Box<Expr>),
+    BinOp(BinOp, Box<Expr>, Box<Expr>),
+    If(Box<Expr>, Box<Expr>, Box<Expr>),
+    Block(Vec<Expr>),
+    Loop(Box<Expr>),
+    Break(Box<Expr>),
+    Set(String, Box<Expr>),
 }
 
 // ============= Assembly Representation =============
 
 /// Values that can appear in assembly instructions
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 enum Val {
     Reg(Reg),
-    Imm(i32),
+    Imm(i64),
     RegOffset(Reg, i32), // e.g., [rsp - 8]
 }
 
 /// Registers we use
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 enum Reg {
     RAX,
     RSP,
+    RBX,
+    RDI,
 }
 
 /// Assembly instructions we generate
@@ -62,6 +86,16 @@ enum Instr {
     IAdd(Val, Val),
     ISub(Val, Val),
     IMul(Val, Val),
+    ICmp(Val, Val),
+    IJmp(String),
+    IJne(String),
+    ILabel(String),
+    IAnd(Val, Val),
+    IJge(String),
+    IJle(String),
+    IJg(String),
+    IJl(String),
+    ISar(Val, Val),
 }
 
 
@@ -90,12 +124,15 @@ fn parse_expr(s: &Sexp) -> Expr {
             Expr::Number(i32::try_from(*n).unwrap_or_else(|_| panic!("Invalid")))
         }
 
+        Sexp::Atom(S(name)) if name == "true" => Expr::Bool(true),
+        Sexp::Atom(S(name)) if name == "false" => Expr::Bool(false),
+
         // TODO: Handle identifier atoms
         // Hint: Sexp::Atom(S(name)) => ...
         //       Make sure to check it's not a reserved keyword
         Sexp::Atom(S(name)) => {
             match name.as_str() {
-                "add1" | "sub1" | "let" => panic!("Invalid: reserved keyword used as identifier"),
+                "add1" | "sub1" | "let" | "loop" | "break" | "if" | "block" => panic!("Invalid: reserved keyword used as identifier"),
                 _ => Expr::Id(name.clone()),
             }
         }
@@ -111,14 +148,42 @@ fn parse_expr(s: &Sexp) -> Expr {
         //   [Sexp::Atom(S(op)), e1, e2] if op == "*" => BinOp(Times, ...)
         //   [Sexp::Atom(S(op)), Sexp::List(bindings), body] if op == "let" => ...
         Sexp::List(vec) => match &vec[..] {
-            [Sexp::Atom(S(op)), e] if op == "add1" => Expr::UnOp(Op1::Add1, Box::new(parse_expr(e))),
-            [Sexp::Atom(S(op)), e] if op == "sub1" => Expr::UnOp(Op1::Sub1, Box::new(parse_expr(e))),
-            [Sexp::Atom(S(op)), e1, e2] if op == "+" => Expr::BinOp(Op2::Plus, Box::new(parse_expr(e1)), Box::new(parse_expr(e2))),
-            [Sexp::Atom(S(op)), e1, e2] if op == "-" => Expr::BinOp(Op2::Minus, Box::new(parse_expr(e1)), Box::new(parse_expr(e2))),
-            [Sexp::Atom(S(op)), e1, e2] if op == "*" => Expr::BinOp(Op2::Times, Box::new(parse_expr(e1)), Box::new(parse_expr(e2))),
+            [Sexp::Atom(S(op)), e] if op == "add1" => Expr::UnOp(UnOp::Add1, Box::new(parse_expr(e))),
+            [Sexp::Atom(S(op)), e] if op == "sub1" => Expr::UnOp(UnOp::Sub1, Box::new(parse_expr(e))),
+            [Sexp::Atom(S(op)), e1, e2] if op == "+" => Expr::BinOp(BinOp::Plus, Box::new(parse_expr(e1)), Box::new(parse_expr(e2))),
+            [Sexp::Atom(S(op)), e1, e2] if op == "-" => Expr::BinOp(BinOp::Minus, Box::new(parse_expr(e1)), Box::new(parse_expr(e2))),
+            [Sexp::Atom(S(op)), e1, e2] if op == "*" => Expr::BinOp(BinOp::Times, Box::new(parse_expr(e1)), Box::new(parse_expr(e2))),
+            [Sexp::Atom(S(op)), e1, e2] if op == "<" => Expr::BinOp(BinOp::Less, Box::new(parse_expr(e1)), Box::new(parse_expr(e2))),
+            [Sexp::Atom(S(op)), e1, e2] if op == ">" => Expr::BinOp(BinOp::Greater, Box::new(parse_expr(e1)), Box::new(parse_expr(e2))),
+            [Sexp::Atom(S(op)), e1, e2] if op == "<=" => Expr::BinOp(BinOp::LessEq, Box::new(parse_expr(e1)), Box::new(parse_expr(e2))),
+            [Sexp::Atom(S(op)), e1, e2] if op == ">=" => Expr::BinOp(BinOp::GreaterEq, Box::new(parse_expr(e1)), Box::new(parse_expr(e2))),
+            [Sexp::Atom(S(op)), e1, e2] if op == "=" => Expr::BinOp(BinOp::Equal, Box::new(parse_expr(e1)), Box::new(parse_expr(e2))),
+            [Sexp::Atom(S(op)), cond, thn, els] if op == "if" => {
+                Expr::If(Box::new(parse_expr(cond)), Box::new(parse_expr(thn)), Box::new(parse_expr(els)))
+            },
+        
+            // Handle (set! <name> <val>)
+            [Sexp::Atom(S(op)), Sexp::Atom(S(name)), e] if op == "set!" => {
+                Expr::Set(name.clone(), Box::new(parse_expr(e)))
+            },
+        
+            // Handle (loop <body>)
+            [Sexp::Atom(S(op)), body] if op == "loop" => {
+                Expr::Loop(Box::new(parse_expr(body)))
+            },
+        
+            // Handle (break <val>)
+            [Sexp::Atom(S(op)), val] if op == "break" => {
+                Expr::Break(Box::new(parse_expr(val)))
+            },
+
+            [Sexp::Atom(S(op)), exprs @ ..] if op == "block" => {
+                Expr::Block(exprs.iter().map(parse_expr).collect())
+            },
             [Sexp::Atom(S(op)), Sexp::List(bindings), body] if op == "let" => {
                 let parsed_bindings = bindings.iter().map(|b| parse_bind(b)).collect();
                 Expr::Let(parsed_bindings, Box::new(parse_expr(body)))
+    
             }
 
         _ => panic!("Invalid: unrecognized expression"),
@@ -155,12 +220,12 @@ fn parse_bind(s: &Sexp) -> (String, Expr) {
     //panic!("TODO: Implement parse_bind")
 }
 
-fn compile_to_instrs(e: &Expr, si: i32, env: &HashMap<String, i32>) -> Vec<Instr> {
+fn compile_to_instrs(e: &Expr, si: i32, env: &HashMap<String, i32>, label_counter: &mut i32, break_target: &Option<String>) -> Vec<Instr> {
     match e {
         // TODO: Number - move immediate value to RAX
         // vec![IMov(Val::Reg(Reg::RAX), Val::Imm(*n))]
         Expr::Number(n) => { 
-            vec![Instr::IMov(Val::Reg(Reg::RAX), Val::Imm(*n))]
+            vec![Instr::IMov(Val::Reg(Reg::RAX), Val::Imm(encode_num(*n)))]
         }   
 
         // TODO: Id - look up variable in environment, load from stack
@@ -175,10 +240,35 @@ fn compile_to_instrs(e: &Expr, si: i32, env: &HashMap<String, i32>) -> Vec<Instr
         // TODO: UnOp - compile subexpression, then apply operation
         // Add1: compile e, then IAdd(Reg(RAX), Imm(1))
         // Sub1: compile e, then ISub(Reg(RAX), Imm(1))
-        Expr::UnOp(op, e) => compile_to_instrs(e, si, env).into_iter().chain(
+        Expr::UnOp(op, e) => compile_to_instrs(e, si, env, label_counter, break_target).into_iter().chain(
             match op {
-                Op1::Add1 => vec![Instr::IAdd(Val::Reg(Reg::RAX), Val::Imm(1))],
-                Op1::Sub1 => vec![Instr::ISub(Val::Reg(Reg::RAX), Val::Imm(1))],
+                UnOp::Add1 => vec![Instr::IAdd(Val::Reg(Reg::RAX), Val::Imm(encode_num(1)))],
+                UnOp::Sub1 => vec![Instr::ISub(Val::Reg(Reg::RAX), Val::Imm(encode_num(1)))],   
+                UnOp::Negate => vec![Instr::IMul(Val::Reg(Reg::RAX), Val::Imm(-1))],
+                UnOp::IsNum => {
+                    let skip_label = new_label(label_counter, "isnum_skip");
+                    vec![
+                        Instr::IMov(Val::Reg(Reg::RBX), Val::Reg(Reg::RAX)),
+                        Instr::IAnd(Val::Reg(Reg::RBX), Val::Imm(NUM_TAG_MASK)),
+                        Instr::ICmp(Val::Reg(Reg::RBX), Val::Imm(NUM_TAG)),
+                        Instr::IMov(Val::Reg(Reg::RAX), Val::Imm(FALSE_VAL)), // Default to False
+                        Instr::IJne(skip_label.clone()),                     // If not a num, jump to end
+                        Instr::IMov(Val::Reg(Reg::RAX), Val::Imm(TRUE_VAL)),  // Otherwise, set to True
+                        Instr::ILabel(skip_label),
+                    ]
+                },
+                UnOp::IsBool => {
+                    let skip_label = new_label(label_counter, "isbool_skip");
+                    vec![
+                        Instr::IMov(Val::Reg(Reg::RBX), Val::Reg(Reg::RAX)),
+                        Instr::IAnd(Val::Reg(Reg::RBX), Val::Imm(BOOL_TAG_MASK)),
+                        Instr::ICmp(Val::Reg(Reg::RBX), Val::Imm(BOOL_TAG)),
+                        Instr::IMov(Val::Reg(Reg::RAX), Val::Imm(FALSE_VAL)),
+                        Instr::IJne(skip_label.clone()),
+                        Instr::IMov(Val::Reg(Reg::RAX), Val::Imm(TRUE_VAL)),
+                        Instr::ILabel(skip_label),
+                    ]
+                },
             }
         ).collect(),
 
@@ -196,16 +286,93 @@ fn compile_to_instrs(e: &Expr, si: i32, env: &HashMap<String, i32>) -> Vec<Instr
         // Hint: You may need to move the left operand back to RAX
         //       and then apply the operation with the right operand
         Expr::BinOp(op, left, right) => {
-            let mut instrs = compile_to_instrs(left, si, env);
-            instrs.push(Instr::IMov(Val::RegOffset(Reg::RSP, -8*si), Val::Reg(Reg::RAX)));
-            instrs.extend(compile_to_instrs(right, si+1, env));
+            let mut instrs = compile_to_instrs(left, si, env, label_counter, break_target);
             let offset = -8*si;
+
+            instrs.push(Instr::IMov(Val::Reg(Reg::RBX), Val::Reg(Reg::RAX)));
+            instrs.push(Instr::IAnd(Val::Reg(Reg::RBX), Val::Imm(1)));
+            instrs.push(Instr::ICmp(Val::Reg(Reg::RBX), Val::Imm(0)));
+            instrs.push(Instr::IJne("throw_error".to_string()));
+
+            instrs.push(Instr::IMov(Val::RegOffset(Reg::RSP, offset), Val::Reg(Reg::RAX)));
+            instrs.extend(compile_to_instrs(right, si+1, env, label_counter, break_target));
+
+            instrs.push(Instr::IMov(Val::Reg(Reg::RBX), Val::Reg(Reg::RAX)));
+            instrs.push(Instr::IAnd(Val::Reg(Reg::RBX), Val::Imm(1)));
+            instrs.push(Instr::ICmp(Val::Reg(Reg::RBX), Val::Imm(0)));
+            instrs.push(Instr::IJne("throw_error".to_string()));
             match op {
-                Op2::Plus => instrs.push(Instr::IAdd(Val::Reg(Reg::RAX), Val::RegOffset(Reg::RSP, offset))),
-                Op2::Minus => {
-                    instrs.push(Instr::ISub(Val::Reg(Reg::RAX), Val::RegOffset(Reg::RSP, offset)));
+                BinOp::Plus => instrs.push(Instr::IAdd(Val::Reg(Reg::RAX), Val::RegOffset(Reg::RSP, offset))),
+                BinOp::Minus => {
+                    instrs.push(Instr::IMov(Val::Reg(Reg::RBX), Val::Reg(Reg::RAX))); 
+                    instrs.push(Instr::IMov(Val::Reg(Reg::RAX), Val::RegOffset(Reg::RSP, offset))); 
+                    instrs.push(Instr::ISub(Val::Reg(Reg::RAX), Val::Reg(Reg::RBX)));
                 },
-                Op2::Times => instrs.push(Instr::IMul(Val::Reg(Reg::RAX), Val::RegOffset(Reg::RSP, offset))),
+                BinOp::Times => {
+                    instrs.push(Instr::IMov(Val::Reg(Reg::RBX), Val::RegOffset(Reg::RSP, offset)));
+                    instrs.push(Instr::IMul(Val::Reg(Reg::RAX), Val::Reg(Reg::RBX)));
+                    instrs.push(Instr::ISar(Val::Reg(Reg::RAX), Val::Imm(1)));
+                },
+                BinOp::Less => {
+                    let else_label = new_label(label_counter, "less_else");
+                    let end_label = new_label(label_counter, "less_end");
+
+                    instrs.push(Instr::ICmp(Val::Reg(Reg::RAX), Val::RegOffset(Reg::RSP, offset)));
+                    instrs.push(Instr::IJge(else_label.clone()));
+                    instrs.push(Instr::IMov(Val::Reg(Reg::RAX), Val::Imm(FALSE_VAL)));
+                    instrs.push(Instr::IJmp(end_label.clone()));
+                    instrs.push(Instr::ILabel(else_label));
+                    instrs.push(Instr::IMov(Val::Reg(Reg::RAX), Val::Imm(TRUE_VAL)));
+                    instrs.push(Instr::ILabel(end_label));
+                },
+                BinOp::Greater => {
+                    let else_label = new_label(label_counter, "greater_else");
+                    let end_label = new_label(label_counter, "greater_end");
+
+                    instrs.push(Instr::ICmp(Val::Reg(Reg::RAX), Val::RegOffset(Reg::RSP, offset)));
+                    instrs.push(Instr::IJle(else_label.clone()));
+                    instrs.push(Instr::IMov(Val::Reg(Reg::RAX), Val::Imm(FALSE_VAL)));
+                    instrs.push(Instr::IJmp(end_label.clone()));
+                    instrs.push(Instr::ILabel(else_label));
+                    instrs.push(Instr::IMov(Val::Reg(Reg::RAX), Val::Imm(TRUE_VAL)));
+                    instrs.push(Instr::ILabel(end_label));
+                },
+                BinOp::LessEq => {
+                    let else_label = new_label(label_counter, "lesseq_else");
+                    let end_label = new_label(label_counter, "lesseq_end");
+
+                    instrs.push(Instr::ICmp(Val::Reg(Reg::RAX), Val::RegOffset(Reg::RSP, offset)));
+                    instrs.push(Instr::IJg(else_label.clone()));
+                    instrs.push(Instr::IMov(Val::Reg(Reg::RAX), Val::Imm(FALSE_VAL)));
+                    instrs.push(Instr::IJmp(end_label.clone()));
+                    instrs.push(Instr::ILabel(else_label));
+                    instrs.push(Instr::IMov(Val::Reg(Reg::RAX), Val::Imm(TRUE_VAL)));
+                    instrs.push(Instr::ILabel(end_label));
+                },
+                BinOp::GreaterEq => {
+                    let else_label = new_label(label_counter, "greatereq_else");
+                    let end_label = new_label(label_counter, "greatereq_end");
+
+                    instrs.push(Instr::ICmp(Val::Reg(Reg::RAX), Val::RegOffset(Reg::RSP, offset)));
+                    instrs.push(Instr::IJl(else_label.clone()));
+                    instrs.push(Instr::IMov(Val::Reg(Reg::RAX), Val::Imm(FALSE_VAL)));
+                    instrs.push(Instr::IJmp(end_label.clone()));
+                    instrs.push(Instr::ILabel(else_label));
+                    instrs.push(Instr::IMov(Val::Reg(Reg::RAX), Val::Imm(TRUE_VAL)));
+                    instrs.push(Instr::ILabel(end_label));
+                },
+                BinOp::Equal => {
+                    let else_label = new_label(label_counter, "equal_else");
+                    let end_label = new_label(label_counter, "equal_end");
+
+                    instrs.push(Instr::ICmp(Val::Reg(Reg::RAX), Val::RegOffset(Reg::RSP, offset)));
+                    instrs.push(Instr::IJne(else_label.clone()));
+                    instrs.push(Instr::IMov(Val::Reg(Reg::RAX), Val::Imm(FALSE_VAL)));
+                    instrs.push(Instr::IJmp(end_label.clone()));
+                    instrs.push(Instr::ILabel(else_label));
+                    instrs.push(Instr::IMov(Val::Reg(Reg::RAX), Val::Imm(TRUE_VAL)));
+                    instrs.push(Instr::ILabel(end_label));
+                },    
             }
             instrs
         }
@@ -234,18 +401,91 @@ fn compile_to_instrs(e: &Expr, si: i32, env: &HashMap<String, i32>) -> Vec<Instr
                 }
                 seen.insert(name.clone(), true);
 
-                instrs.extend(compile_to_instrs(expr, current_si, &current_env));
+                instrs.extend(compile_to_instrs(expr, current_si, &current_env, label_counter, break_target));
                 instrs.push(Instr::IMov(Val::RegOffset(Reg::RSP, -8*current_si), Val::Reg(Reg::RAX)));
                 current_env.insert(name.clone(), -8*current_si);
                 current_si += 1;
             }
 
-            instrs.extend(compile_to_instrs(body, current_si, &current_env));
+            instrs.extend(compile_to_instrs(body, current_si, &current_env, label_counter, break_target));
+            instrs
+        }
+
+        Expr::Bool(b) => {
+            let val = if *b { 1 } else { 3 };
+            vec![Instr::IMov(Val::Reg(Reg::RAX), Val::Imm(val))]
+        }
+
+        Expr::If(cond, then_expr, else_expr) => {
+            let else_label = new_label(label_counter, "if_else");
+            let end_label = new_label(label_counter, "if_end");
+            let mut instrs = Vec::new();
+
+            instrs.extend(compile_to_instrs(cond, si, env, label_counter, break_target));
+
+            instrs.push(Instr::ICmp(Val::Reg(Reg::RAX), Val::Imm(1)));
+            instrs.push(Instr::IJne(else_label.clone()));
+
+            instrs.extend(compile_to_instrs(then_expr, si, env, label_counter, break_target));
+            instrs.push(Instr::IJmp(end_label.clone()));
+
+            instrs.push(Instr::ILabel(else_label));
+            instrs.extend(compile_to_instrs(else_expr, si, env, label_counter, break_target));
+            instrs.push(Instr::ILabel(end_label));
+            instrs
+
+        }
+
+        Expr::Loop(body) => {
+            let start_label = new_label(label_counter, "loop_start");
+            let end_label = new_label(label_counter, "loop_end");
+            let mut instrs = Vec::new();
+
+            instrs.push(Instr::ILabel(start_label.clone()));
+            instrs.extend(compile_to_instrs(body, si, env, label_counter, &Some(end_label.clone())));
+            instrs.push(Instr::IJmp(start_label));
+            instrs.push(Instr::ILabel(end_label));
+            instrs
+        }
+
+        Expr::Break(expr) => {
+            match break_target {
+                Some(label) => {
+                    let mut instrs = compile_to_instrs(expr, si, env, label_counter, break_target);
+                    instrs.push(Instr::IJmp(label.clone()));
+                    instrs
+                },
+                None => panic!("Break statement not within a loop"),
+            }
+        }
+
+        Expr::Set(name, expr) => {
+            let mut instrs = compile_to_instrs(expr, si, env, label_counter, break_target);
+            let offset = env.get(name).unwrap_or_else(|| panic!("Unbound variable identifier {}", name));
+            instrs.push(Instr::IMov(Val::RegOffset(Reg::RSP, *offset), Val::Reg(Reg::RAX)));
+            instrs
+        }
+
+        Expr::Input => vec![Instr::IMov(Val::Reg(Reg::RAX), Val::Reg(Reg::RDI))],
+        Expr::Var(name) => {
+            let offset = env.get(name).unwrap_or_else(|| panic!("Unbound variable identifier {}", name));
+            vec![Instr::IMov(Val::Reg(Reg::RAX), Val::RegOffset(Reg::RSP, *offset))]
+        }
+        Expr::Block(exprs) => {
+            let mut instrs = Vec::new();
+            for expr in exprs {
+                instrs.extend(compile_to_instrs(expr, si, env, label_counter, break_target));
+            }
             instrs
         }
 
         _ => panic!("TODO: Implement compile_to_instrs for {:?}", e),
     }
+}
+
+fn new_label(label_counter: &mut i32, name: &str) -> String {
+    *label_counter += 1;
+    format!("{}_{}", name, label_counter)
 }
 
 fn main() -> std::io::Result<()> {
@@ -275,10 +515,16 @@ fn main() -> std::io::Result<()> {
     // Wrap instructions in assembly program template
     let asm_program = format!(
         "section .text
-global our_code_starts_here
-our_code_starts_here:
-  {}
-  ret
+        extern _snek_error              ; Tell linker snek_error is external
+        global our_code_starts_here    ; Add underscore for Mac
+        our_code_starts_here:          ; Add underscore for Mac
+            {}
+            ret
+        
+        throw_error:                    ; Give this a unique name
+            mov rdi, 1                  ; Put error code in rdi
+            call _snek_error
+
 ",
         instrs
     );
@@ -298,9 +544,23 @@ fn val_to_str(v: &Val) -> String {
     match v {
         Val::Reg(Reg::RAX) => String::from("rax"),
         Val::Reg(Reg::RSP) => String::from("rsp"),
+        Val::Reg(Reg::RBX) => String::from("rbx"),
+        Val::Reg(Reg::RDI) => String::from("rdi"),
         Val::Imm(n) => format!("{}", n),
-        Val::RegOffset(Reg::RSP, offset) => format!("[rsp + {}]", offset),
-        Val::RegOffset(Reg::RAX, offset) => format!("[rax + {}]", offset),
+        Val::RegOffset(reg, offset) => {
+            let r_str = match reg {
+                Reg::RAX => "rax",
+                Reg::RSP => "rsp",
+                Reg::RBX => "rbx",
+                Reg::RDI => "rdi", 
+            };
+            if *offset < 0 {
+                format!("[{} - {}]", r_str, -offset)
+            } else {
+                format!("[{} + {}]", r_str, offset)
+            }
+        }
+
     }
 }
 
@@ -311,13 +571,24 @@ fn instr_to_str(i: &Instr) -> String {
         Instr::IAdd(dst, src) => format!("add {}, {}", val_to_str(dst), val_to_str(src)),
         Instr::ISub(dst, src) => format!("sub {}, {}", val_to_str(dst), val_to_str(src)),
         Instr::IMul(dst, src) => format!("imul {}, {}", val_to_str(dst), val_to_str(src)),
+        Instr::ICmp(lhs, rhs) => format!("cmp {}, {}", val_to_str(lhs), val_to_str(rhs)),
+        Instr::IJmp(label) => format!("jmp {}", label),
+        Instr::IJne(label) => format!("jne {}", label),
+        Instr::ILabel(label) => format!("{}:", label),
+        Instr::IAnd(dst, src) => format!("and {}, {}", val_to_str(dst), val_to_str(src)),
+        Instr::IJge(label) => format!("jge {}", label),
+        Instr::IJle(label) => format!("jle {}", label),
+        Instr::IJg(label) => format!("jg {}", label),
+        Instr::IJl(label) => format!("jl {}", label),
+        Instr::ISar(dst, src) => format!("sar {}, {}", val_to_str(dst), val_to_str(src)),
     }
 }
 
 /// Compile an expression to a complete assembly string
 fn compile(e: &Expr) -> String {
     let env: HashMap<String, i32> = HashMap::new();
-    let instrs = compile_to_instrs(e, 2, &env);
+    let mut label_counter = 0;
+    let instrs = compile_to_instrs(e, 2, &env, &mut label_counter, &None);
     instrs
         .iter()
         .map(|i| instr_to_str(i))
