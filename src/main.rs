@@ -317,8 +317,9 @@ fn compile_to_instrs(e: &Expr, si: i32, env: &HashMap<String, i32>, label_counte
                     let else_label = new_label(label_counter, "less_else");
                     let end_label = new_label(label_counter, "less_end");
 
-                    instrs.push(Instr::ICmp(Val::Reg(Reg::RAX), Val::RegOffset(Reg::RSP, offset)));
-                    instrs.push(Instr::IJge(else_label.clone()));
+                    instrs.push(Instr::IMov(Val::Reg(Reg::RBX), Val::RegOffset(Reg::RSP, offset)));
+                    instrs.push(Instr::ICmp(Val::Reg(Reg::RBX), Val::Reg(Reg::RAX)));
+                    instrs.push(Instr::IJl(else_label.clone())); 
                     instrs.push(Instr::IMov(Val::Reg(Reg::RAX), Val::Imm(FALSE_VAL)));
                     instrs.push(Instr::IJmp(end_label.clone()));
                     instrs.push(Instr::ILabel(else_label));
@@ -329,8 +330,10 @@ fn compile_to_instrs(e: &Expr, si: i32, env: &HashMap<String, i32>, label_counte
                     let else_label = new_label(label_counter, "greater_else");
                     let end_label = new_label(label_counter, "greater_end");
 
-                    instrs.push(Instr::ICmp(Val::Reg(Reg::RAX), Val::RegOffset(Reg::RSP, offset)));
-                    instrs.push(Instr::IJle(else_label.clone()));
+                    instrs.push(Instr::IMov(Val::Reg(Reg::RBX), Val::RegOffset(Reg::RSP, offset)));
+                    instrs.push(Instr::ICmp(Val::Reg(Reg::RBX), Val::Reg(Reg::RAX)));
+    
+                    instrs.push(Instr::IJg(else_label.clone())); // Jump if left > right
                     instrs.push(Instr::IMov(Val::Reg(Reg::RAX), Val::Imm(FALSE_VAL)));
                     instrs.push(Instr::IJmp(end_label.clone()));
                     instrs.push(Instr::ILabel(else_label));
@@ -341,8 +344,10 @@ fn compile_to_instrs(e: &Expr, si: i32, env: &HashMap<String, i32>, label_counte
                     let else_label = new_label(label_counter, "lesseq_else");
                     let end_label = new_label(label_counter, "lesseq_end");
 
-                    instrs.push(Instr::ICmp(Val::Reg(Reg::RAX), Val::RegOffset(Reg::RSP, offset)));
-                    instrs.push(Instr::IJg(else_label.clone()));
+                    instrs.push(Instr::IMov(Val::Reg(Reg::RBX), Val::RegOffset(Reg::RSP, offset)));
+                    instrs.push(Instr::ICmp(Val::Reg(Reg::RBX), Val::Reg(Reg::RAX)));
+    
+                    instrs.push(Instr::IJle(else_label.clone())); // Jump if left <= right
                     instrs.push(Instr::IMov(Val::Reg(Reg::RAX), Val::Imm(FALSE_VAL)));
                     instrs.push(Instr::IJmp(end_label.clone()));
                     instrs.push(Instr::ILabel(else_label));
@@ -353,8 +358,10 @@ fn compile_to_instrs(e: &Expr, si: i32, env: &HashMap<String, i32>, label_counte
                     let else_label = new_label(label_counter, "greatereq_else");
                     let end_label = new_label(label_counter, "greatereq_end");
 
-                    instrs.push(Instr::ICmp(Val::Reg(Reg::RAX), Val::RegOffset(Reg::RSP, offset)));
-                    instrs.push(Instr::IJl(else_label.clone()));
+                    instrs.push(Instr::IMov(Val::Reg(Reg::RBX), Val::RegOffset(Reg::RSP, offset)));
+                    instrs.push(Instr::ICmp(Val::Reg(Reg::RBX), Val::Reg(Reg::RAX)));
+    
+                    instrs.push(Instr::IJge(else_label.clone())); // Jump if left >= right
                     instrs.push(Instr::IMov(Val::Reg(Reg::RAX), Val::Imm(FALSE_VAL)));
                     instrs.push(Instr::IJmp(end_label.clone()));
                     instrs.push(Instr::ILabel(else_label));
@@ -365,12 +372,15 @@ fn compile_to_instrs(e: &Expr, si: i32, env: &HashMap<String, i32>, label_counte
                     let else_label = new_label(label_counter, "equal_else");
                     let end_label = new_label(label_counter, "equal_end");
 
-                    instrs.push(Instr::ICmp(Val::Reg(Reg::RAX), Val::RegOffset(Reg::RSP, offset)));
-                    instrs.push(Instr::IJne(else_label.clone()));
-                    instrs.push(Instr::IMov(Val::Reg(Reg::RAX), Val::Imm(FALSE_VAL)));
-                    instrs.push(Instr::IJmp(end_label.clone()));
-                    instrs.push(Instr::ILabel(else_label));
+                    instrs.push(Instr::IMov(Val::Reg(Reg::RBX), Val::RegOffset(Reg::RSP, offset)));
+                    instrs.push(Instr::ICmp(Val::Reg(Reg::RBX), Val::Reg(Reg::RAX)));
+                    instrs.push(Instr::IJne(else_label.clone())); 
+    
                     instrs.push(Instr::IMov(Val::Reg(Reg::RAX), Val::Imm(TRUE_VAL)));
+                    instrs.push(Instr::IJmp(end_label.clone()));
+    
+                    instrs.push(Instr::ILabel(else_label));
+                    instrs.push(Instr::IMov(Val::Reg(Reg::RAX), Val::Imm(FALSE_VAL)));
                     instrs.push(Instr::ILabel(end_label));
                 },    
             }
@@ -412,7 +422,7 @@ fn compile_to_instrs(e: &Expr, si: i32, env: &HashMap<String, i32>, label_counte
         }
 
         Expr::Bool(b) => {
-            let val = if *b { 1 } else { 3 };
+            let val = if *b { TRUE_VAL } else { FALSE_VAL };
             vec![Instr::IMov(Val::Reg(Reg::RAX), Val::Imm(val))]
         }
 
@@ -423,8 +433,8 @@ fn compile_to_instrs(e: &Expr, si: i32, env: &HashMap<String, i32>, label_counte
 
             instrs.extend(compile_to_instrs(cond, si, env, label_counter, break_target));
 
-            instrs.push(Instr::ICmp(Val::Reg(Reg::RAX), Val::Imm(1)));
-            instrs.push(Instr::IJne(else_label.clone()));
+            instrs.push(Instr::ICmp(Val::Reg(Reg::RAX), Val::Imm(TRUE_VAL)));
+            instrs.push(Instr::IJne(else_label.clone())); 
 
             instrs.extend(compile_to_instrs(then_expr, si, env, label_counter, break_target));
             instrs.push(Instr::IJmp(end_label.clone()));
@@ -674,7 +684,7 @@ mod tests {
     fn test_duplicate_binding() {
         let expr = parse_str("(let ((x 1) (x 2)) x)");
         let env: HashMap<String, i32> = HashMap::new();
-        compile_to_instrs(&expr, 2, &env);
+        compile_to_instrs(&expr, 2, &env, &mut 0, &None);
     }
 
     #[test]
@@ -682,7 +692,7 @@ mod tests {
     fn test_unbound_variable() {
         let expr = parse_str("y");
         let env: HashMap<String, i32> = HashMap::new();
-        compile_to_instrs(&expr, 2, &env);
+        compile_to_instrs(&expr, 2, &env, &mut 0, &None);
     }
 
     // ===== Compilation Tests =====
@@ -691,7 +701,7 @@ mod tests {
     fn test_compile_number() {
         let expr = Expr::Number(42);
         let env: HashMap<String, i32> = HashMap::new();
-        let instrs = compile_to_instrs(&expr, 2, &env);
+        let instrs = compile_to_instrs(&expr, 2, &env, );
         assert_eq!(instrs.len(), 1);
     }
 
