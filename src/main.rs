@@ -43,6 +43,17 @@ enum BinOp {
 ///           | (add1 <expr>) | (sub1 <expr>)
 ///           | (+ <expr> <expr>) | (- <expr> <expr>) | (* <expr> <expr>)
 ///   <binding> := (<identifier> <expr>)
+struct Program {
+    defns: Vec<Definition>,
+    main: Expr,
+}
+
+struct Definition {
+    name: String,
+    params: Vec<String>,
+    body: Expr,
+}
+
 #[derive(Debug)]
 enum Expr {
     Number(i32),
@@ -58,6 +69,7 @@ enum Expr {
     Loop(Box<Expr>),
     Break(Box<Expr>),
     Set(String, Box<Expr>),
+    Call(String, Vec<Expr>),
 }
 
 // ============= Assembly Representation =============
@@ -77,6 +89,7 @@ enum Reg {
     RSP,
     RBX,
     RDI,
+    RBP,
 }
 
 /// Assembly instructions we generate
@@ -96,6 +109,9 @@ enum Instr {
     IJg(String),
     IJl(String),
     ISar(Val, Val),
+    IPush(Val),
+    IPop(Val),
+    ICall(String),
 }
 
 
@@ -479,13 +495,44 @@ fn compile_to_instrs(e: &Expr, si: i32, env: &HashMap<String, i32>, label_counte
         Expr::Input => vec![Instr::IMov(Val::Reg(Reg::RAX), Val::Reg(Reg::RDI))],
         Expr::Var(name) => {
             let offset = env.get(name).unwrap_or_else(|| panic!("Unbound variable identifier {}", name));
-            vec![Instr::IMov(Val::Reg(Reg::RAX), Val::RegOffset(Reg::RSP, *offset))]
+            if *offset > 0 {
+                vec![Instr::IMov(
+                    Val::Reg(Reg::RAX), 
+                    Val::RegOffset(Reg::RBP, *offset)
+                )]
+            } else {
+                vec![Instr::IMov(
+                    Val::Reg(Reg::RAX), 
+                    Val::RegOffset(Reg::RSP, *offset)
+                )]
+            }
         }
         Expr::Block(exprs) => {
             let mut instrs = Vec::new();
             for expr in exprs {
                 instrs.extend(compile_to_instrs(expr, si, env, label_counter, break_target));
             }
+            instrs
+        }
+
+        Expr::Call(name, args) => {
+            llet mut instrs = Vec::new();
+            
+            // Push arguments right-to-left
+            for arg in args.iter().rev() {
+                instrs.extend(compile_to_instrs(arg, si, env, label_counter, break_target));
+                instrs.push(Instr::IPush(Val::Reg(Reg::RAX)));
+            }
+            
+            // Call function
+            instrs.push(Instr::ICall(format!("fun_{}", name)));
+            
+            // Clean up stack
+            if !args.is_empty() {
+                let padding = (args.len() * 8) as i64;
+                instrs.push(Instr::IAdd(Val::Reg(Reg::RSP), Val::Imm(padding)));
+            }
+            
             instrs
         }
 
@@ -563,6 +610,7 @@ fn val_to_str(v: &Val) -> String {
                 Reg::RSP => "rsp",
                 Reg::RBX => "rbx",
                 Reg::RDI => "rdi", 
+                Reg::RBP => "rbp",
             };
             if *offset < 0 {
                 format!("[{} - {}]", r_str, -offset)
@@ -591,6 +639,9 @@ fn instr_to_str(i: &Instr) -> String {
         Instr::IJg(label) => format!("jg {}", label),
         Instr::IJl(label) => format!("jl {}", label),
         Instr::ISar(dst, src) => format!("sar {}, {}", val_to_str(dst), val_to_str(src)),
+        Instr::IPush(v) => format!("push {}", val_to_str(v)),
+        Instr::IPop(v) => format!("pop {}", val_to_str(v)),
+        Instr::ICall(label) => format!("call {}", label),
     }
 }
 
@@ -604,6 +655,109 @@ fn compile(e: &Expr) -> String {
         .map(|i| instr_to_str(i))
         .collect::<Vec<String>>()
         .join("\n  ")
+}
+
+fn parse_program(s: &Sexp) -> Program {
+    match s {
+        Sexp::List(items) => {
+            let mut defns = vec![];
+            let mut main_expr = None;
+            
+            for item in items {
+                if let Some(defn) = try_parse_defn(item) {
+                    defns.push(defn);
+                } else if main_expr.is_none() {
+                    main_expr = Some(parse_expr(item));
+                } else {
+                    panic!("Multiple main expressions");
+                }
+            }
+            
+            Program {
+                defns,
+                main: main_expr.expect("No main expression"),
+            }
+        }
+        _ => panic!("Invalid program"),
+    }
+}
+
+fn try_parse_defn(s: &Sexp) -> Option<Definition> {
+    match s {
+        Sexp::List(vec) => match &vec[..] {
+            [Sexp::Atom(S(fun)), Sexp::List(signature), body] if fun == "fun" => {
+                match &signature[..] {
+                    [Sexp::Atom(S(name)), params @ ..] => {
+                        let param_names: Vec<String> = params.iter().map(|p| {
+                            match p {
+                                Sexp::Atom(S(name)) => name.clone(),
+                                _ => panic!("Invalid parameter"),
+                            }
+                        }).collect();
+                        
+                        Some(Definition {
+                            name: name.clone(),
+                            params: param_names,
+                            body: parse_expr(body),
+                        })
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn compile_defn(defn: &Definition, label_counter: &mut i32) -> String {
+    let mut instrs = Vec::new();
+        
+    // Function label
+    instrs.push(Instr::ILabel(format!("fun_{}", defn.name)));
+    
+    // Prologue: save rbp
+    instrs.push(Instr::IPush(Val::Reg(Reg::RBP)));
+    instrs.push(Instr::IMov(Val::Reg(Reg::RBP), Val::Reg(Reg::RSP)));
+    
+    // Build environment for parameters
+    let mut env = HashMap::new();
+    for (i, param) in defn.params.iter().enumerate() {
+        env.insert(param.clone(), (16 + (i * 8)) as i32);
+    }
+    
+    // Compile body
+    let body_instrs = compile_expr(&defn.body, &env, 8, label_counter, &None);
+    instrs.push(body_instrs);
+    
+    // Epilogue: restore rbp and return
+    instrs.push(Instr::IPop(Val::Reg(Reg::RBP)));
+    instrs.push(Instr::IRet);
+    
+    instrs.iter().map(instr_to_str).collect::<Vec<_>>().join("\n  ")
+}
+
+fn compile_program(prog: &Program) -> String {
+    let mut label_counter = 0;
+    let mut asm = vec![];
+    
+    // Compile all function definitions
+    for defn in &prog.defns {
+        asm.push(compile_defn(defn, &mut label_counter));
+    }
+    
+    // Compile main entry point
+    asm.push("our_code_starts_here:".to_string());
+    asm.push("push rbp".to_string());
+    asm.push("mov rbp, rsp".to_string());
+    
+    let main_instrs = compile_expr(&prog.main, &HashMap::new(), 8, &mut label_counter, &None);
+    asm.push(main_instrs);
+    
+    asm.push("pop rbp".to_string());
+    asm.push("ret".to_string());
+    
+    format!("section .text\nglobal our_code_starts_here\n{}", asm.join("\n"))
 }
 
 

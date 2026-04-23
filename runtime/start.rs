@@ -14,6 +14,18 @@ extern "C" fn snek_error(errcode: i64) {
     std::process::exit(1);
 }
 
+#[no_mangle]
+extern "C" fn snek_print(val: i64) -> i64 {
+    if val & 1 == 0 {
+        println!("{}", val >> 1);  // Number
+    } else if val == 3 {
+        println!("true");
+    } else if val == 1 {
+        println!("false");
+    }
+    val
+}
+
 fn main() {
     let i: i64 = unsafe {
         our_code_starts_here()
