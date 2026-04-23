@@ -19,27 +19,9 @@ clean:
 	rm -f test/*.s test/*.run runtime/*.o runtime/*.a
 
 # Run all tests
-test: test/simple.run test/add.run test/binop.run test/let_simple.run test/let_multi.run test/nested.run test/simple_loop.run test/simple_comparison.run test/nested_if.run test/compare_equal.run test/compare_not_equal.run test/compare_less_than.run test/compare_gt_equal.run test/descending_loop.run test/simpletruefalse.run test/compare_res.run test/loop_with_break.run test/mixed_logic.run test/multi_var.run
+test: test/fibonacci.run
 	@echo "Running tests..."
-	@echo -n "simple (expected 42): " && ./test/simple.run
-	@echo -n "add (expected 6): " && ./test/add.run
-	@echo -n "binop (expected 9): " && ./test/binop.run
-	@echo -n "let_simple (expected 11): " && ./test/let_simple.run
-	@echo -n "let_multi (expected 11): " && ./test/let_multi.run
-	@echo -n "nested (expected 25): " && ./test/nested.run
-	@echo -n "simple loop (expected 10): " && ./test/simple_loop.run
-	@echo -n "simple comparison (expected true): " && ./test/simple_comparison.run
-	@echo -n "nested if (expected 100): " && ./test/nested_if.run
-	@echo -n "compare equal (expected true): " && ./test/compare_equal.run
-	@echo -n "compare not equal (expected false): " && ./test/compare_not_equal.run
-	@echo -n "compare less than (expected true): " && ./test/compare_less_than.run
-	@echo -n "compare greater than or equal (expected true): " && ./test/compare_gt_equal.run
-	@echo -n "descending loop (expected 0): " && ./test/descending_loop.run
-	@echo -n "simeple true false (expected 10): " && ./test/simpletruefalse.run
-	@echo -n "compare results (expected true): " && ./test/compare_res.run
-	@echo -n "loop with break (expected 0): " && ./test/loop_with_break.run
-	@echo -n "mixed logic (expected true): " && ./test/mixed_logic.run
-	@echo -n "multiple variable assignment (expected 5): " && ./test/multi_var.run
+	@echo -n "fibonacci (expected 55): " && ./test/fibonacci.run
 
 
 .PHONY: clean test

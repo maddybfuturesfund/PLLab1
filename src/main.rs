@@ -112,6 +112,7 @@ enum Instr {
     IPush(Val),
     IPop(Val),
     ICall(String),
+    IRet,
 }
 
 
@@ -200,10 +201,17 @@ fn parse_expr(s: &Sexp) -> Expr {
                 let parsed_bindings = bindings.iter().map(|b| parse_bind(b)).collect();
                 Expr::Let(parsed_bindings, Box::new(parse_expr(body)))
     
-            }
+            },
 
-        _ => panic!("Invalid: unrecognized expression"),
+            [Sexp::Atom(S(name)), args @ ..] => {
+                let parsed_args = args.iter().map(parse_expr).collect();
+                Expr::Call(name.clone(), parsed_args)
+            },
+
+        _ => panic!("Invalid: unrecognized expression list structure: {:?}", vec),
         }
+
+        
     }
 
 }
@@ -250,6 +258,7 @@ fn compile_to_instrs(e: &Expr, si: i32, env: &HashMap<String, i32>, label_counte
         // 2. Generate: IMov(Reg(RAX), RegOffset(RSP, offset))
         Expr::Id(name) => {
             let offset = env.get(name).unwrap_or_else(|| panic!("Unbound variable identifier {}", name));
+            let base_reg = if *offset > 0 { Reg::RBP } else { Reg::RSP };
             vec![Instr::IMov(Val::Reg(Reg::RAX), Val::RegOffset(Reg::RSP, *offset))]
         }
 
@@ -516,7 +525,12 @@ fn compile_to_instrs(e: &Expr, si: i32, env: &HashMap<String, i32>, label_counte
         }
 
         Expr::Call(name, args) => {
-            llet mut instrs = Vec::new();
+            let mut instrs = Vec::new();
+
+            let needs_padding = args.len() % 2 == 0; 
+            if needs_padding {
+                instrs.push(Instr::ISub(Val::Reg(Reg::RSP), Val::Imm(8)));
+            }
             
             // Push arguments right-to-left
             for arg in args.iter().rev() {
@@ -528,10 +542,8 @@ fn compile_to_instrs(e: &Expr, si: i32, env: &HashMap<String, i32>, label_counte
             instrs.push(Instr::ICall(format!("fun_{}", name)));
             
             // Clean up stack
-            if !args.is_empty() {
-                let padding = (args.len() * 8) as i64;
-                instrs.push(Instr::IAdd(Val::Reg(Reg::RSP), Val::Imm(padding)));
-            }
+            let cleanup = (args.len() * 8) + (if needs_padding { 8 } else { 0 });
+            instrs.push(Instr::IAdd(Val::Reg(Reg::RSP), Val::Imm(cleanup as i64)));
             
             instrs
         }
@@ -561,30 +573,19 @@ fn main() -> std::io::Result<()> {
     in_file.read_to_string(&mut in_contents)?;
 
     // Parse S-expression from text
-    let sexp = parse(&in_contents).unwrap_or_else(|_| panic!("Invalid"));
+    let wrapped_contents = format!("({})", in_contents);
+    let sexp = parse(&wrapped_contents).unwrap_or_else(|_| panic!("Invalid S-expression"));
 
     // Convert S-expression to our AST
-    let expr = parse_expr(&sexp);
+    //let expr = parse_expr(&sexp);
+
+    let prog = parse_program(&sexp);
 
     // Generate assembly instructions
-    let instrs = compile(&expr);
+    //let instrs = compile(&expr);
 
-    // Wrap instructions in assembly program template
-    let asm_program = format!(
-        "section .text
-        extern _snek_error              ; Tell linker snek_error is external
-        global our_code_starts_here    ; Add underscore for Mac
-        our_code_starts_here:          ; Add underscore for Mac
-            {}
-            ret
-        
-        throw_error:                    ; Give this a unique name
-            mov rdi, 1                  ; Put error code in rdi
-            call _snek_error
+    let asm_program = compile_program(&prog);
 
-",
-        instrs
-    );
 
     let mut out_file = File::create(out_name)?;
     out_file.write_all(asm_program.as_bytes())?;
@@ -603,6 +604,7 @@ fn val_to_str(v: &Val) -> String {
         Val::Reg(Reg::RSP) => String::from("rsp"),
         Val::Reg(Reg::RBX) => String::from("rbx"),
         Val::Reg(Reg::RDI) => String::from("rdi"),
+        Val::Reg(Reg::RBP) => String::from("rbp"),
         Val::Imm(n) => format!("{}", n),
         Val::RegOffset(reg, offset) => {
             let r_str = match reg {
@@ -642,6 +644,7 @@ fn instr_to_str(i: &Instr) -> String {
         Instr::IPush(v) => format!("push {}", val_to_str(v)),
         Instr::IPop(v) => format!("pop {}", val_to_str(v)),
         Instr::ICall(label) => format!("call {}", label),
+        Instr::IRet => String::from("ret"),
     }
 }
 
@@ -710,8 +713,10 @@ fn try_parse_defn(s: &Sexp) -> Option<Definition> {
     }
 }
 
-fn compile_defn(defn: &Definition, label_counter: &mut i32) -> String {
+fn compile_defn(defn: &Definition, label_counter: &mut i32) -> Vec<Instr> {
     let mut instrs = Vec::new();
+
+    instrs.push(Instr::ISub(Val::Reg(Reg::RSP), Val::Imm(128)));
         
     // Function label
     instrs.push(Instr::ILabel(format!("fun_{}", defn.name)));
@@ -727,37 +732,61 @@ fn compile_defn(defn: &Definition, label_counter: &mut i32) -> String {
     }
     
     // Compile body
-    let body_instrs = compile_expr(&defn.body, &env, 8, label_counter, &None);
-    instrs.push(body_instrs);
+    let body_instrs = compile_to_instrs(&defn.body, 8, &env, label_counter, &None);
+    instrs.extend(body_instrs);
+
+    instrs.push(Instr::IAdd(Val::Reg(Reg::RSP), Val::Imm(128)));
     
     // Epilogue: restore rbp and return
     instrs.push(Instr::IPop(Val::Reg(Reg::RBP)));
     instrs.push(Instr::IRet);
     
-    instrs.iter().map(instr_to_str).collect::<Vec<_>>().join("\n  ")
+    instrs
 }
 
 fn compile_program(prog: &Program) -> String {
     let mut label_counter = 0;
-    let mut asm = vec![];
+    let mut asm = Vec::new();
     
     // Compile all function definitions
     for defn in &prog.defns {
-        asm.push(compile_defn(defn, &mut label_counter));
+        asm.extend(compile_defn(defn, &mut label_counter));
     }
     
     // Compile main entry point
-    asm.push("our_code_starts_here:".to_string());
-    asm.push("push rbp".to_string());
-    asm.push("mov rbp, rsp".to_string());
+    asm.push(Instr::ILabel("our_code_starts_here".to_string()));
+    asm.push(Instr::IPush(Val::Reg(Reg::RBP)));
+    asm.push(Instr::IMov(Val::Reg(Reg::RBP), Val::Reg(Reg::RSP)));
+
+    asm.push(Instr::ISub(Val::Reg(Reg::RSP), Val::Imm(128))); // Allocate stack space for main
     
-    let main_instrs = compile_expr(&prog.main, &HashMap::new(), 8, &mut label_counter, &None);
-    asm.push(main_instrs);
+    let main_instrs = compile_to_instrs(&prog.main, 8, &HashMap::new(), &mut label_counter, &None);
+    asm.extend(main_instrs);
+
+    asm.push(Instr::IAdd(Val::Reg(Reg::RSP), Val::Imm(128))); // Clean up stack space for main
     
-    asm.push("pop rbp".to_string());
-    asm.push("ret".to_string());
+    asm.push(Instr::IPop(Val::Reg(Reg::RBP)));
+    asm.push(Instr::IRet);
+
     
-    format!("section .text\nglobal our_code_starts_here\n{}", asm.join("\n"))
+    let asm_string = asm
+        .iter()
+        .map(instr_to_str)
+        .collect::<Vec<_>>()
+        .join("\n  ");
+
+    format!(
+        "section .text
+global our_code_starts_here
+extern _snek_error
+
+{}
+
+throw_error:
+  mov rdi, 1
+  call _snek_error",
+        asm_string
+    )
 }
 
 
