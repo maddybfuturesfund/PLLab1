@@ -1,0 +1,2 @@
+(fun (fact-let n) (if (= n 1) 1 (let ((next (- n 1))) (* n (fact-let next)))))
+(fact-let 5)

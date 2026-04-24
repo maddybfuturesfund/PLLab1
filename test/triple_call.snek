@@ -1,0 +1,4 @@
+(fun (inc x) (+ x 1))
+(fun (double x) (* x 2))
+(fun (both x) (double (inc x)))
+(both 5)

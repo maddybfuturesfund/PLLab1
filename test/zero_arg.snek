@@ -1,0 +1,2 @@
+(fun (get-five) 5)
+(get-five)

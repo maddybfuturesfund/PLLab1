@@ -1,0 +1,2 @@
+(fun (complex a b) (let ((x (* a a)) (y (* b b))) (+ x y)))
+(complex 3 4)

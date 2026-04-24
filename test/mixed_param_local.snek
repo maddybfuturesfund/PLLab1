@@ -1,0 +1,2 @@
+(fun (mixed x y) (let ((z (+ x y))) (* z 2)))
+(mixed 5 5)

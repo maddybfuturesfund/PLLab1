@@ -1,0 +1,2 @@
+(fun (calc x) (let ((y 10)) (+ x y)))
+(calc 5)

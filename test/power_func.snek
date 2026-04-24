@@ -1,0 +1,2 @@
+(fun (pow base exp) (if (= exp 0) 1 (* base (pow base (- exp 1)))))
+(pow 2 10)

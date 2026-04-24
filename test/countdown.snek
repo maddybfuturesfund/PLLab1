@@ -1,0 +1,2 @@
+(fun (tri n) (if (= n 0) 0 (+ n (tri (- n 1)))))
+(tri 10)

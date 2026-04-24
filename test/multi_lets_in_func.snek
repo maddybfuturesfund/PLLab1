@@ -1,0 +1,2 @@
+(fun (nest x) (let ((a 1)) (let ((b 2)) (+ x (+ a b)))))
+(nest 10)
